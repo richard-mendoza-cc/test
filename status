@@ -1,0 +1,133 @@
+package com.currencycloud.manualledger.service;
+
+import static com.currencycloud.manualledger.util.AppConstants.PENDING_FOLDER;
+
+import com.currencycloud.manualledger.dto.Payload;
+import com.currencycloud.manualledger.exception.BusinessException;
+import com.currencycloud.manualledger.exception.ErrorCode;
+import com.currencycloud.manualledger.exception.SystemException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+
+@Service
+public class SaveFileService {
+
+  private final S3Client s3Client;
+  private final String bucket;
+
+  public SaveFileService(S3Client s3Client, @Value("${s3.bucket}") String bucket) {
+    this.s3Client = s3Client;
+    this.bucket = bucket;
+  }
+
+  /**
+   * Saves a given payload as a CSV file in S3 under the pending folder. Throws BusinessException
+   * for invalid input and SystemException for S3 failures.
+   */
+  public void saveFileToS3(Payload payload) {
+    // Validate input (Business)
+    if (payload == null) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Payload must not be null",
+          null,
+          Map.of("operation", "saveFileToS3", "bucket", bucket));
+    }
+    if (payload.getCashLedgerPayload() == null || payload.getCashLedgerPayload().isEmpty()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Cash ledger payload cannot be empty",
+          null,
+          Map.of("operation", "saveFileToS3", "bucket", bucket, "fileName", payload.getFileName()));
+    }
+    if (payload.getFileName() == null || payload.getFileName().isBlank()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "fileName must not be null or blank",
+          null,
+          Map.of("operation", "saveFileToS3", "bucket", bucket));
+    }
+    if (payload.getFileContent() == null) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "fileContent must not be null",
+          null,
+          Map.of("operation", "saveFileToS3", "bucket", bucket, "fileName", payload.getFileName()));
+    }
+
+    // Resolve requestId from MDC or generate one
+    String requestId = MDC.get("x-request-id");
+    if (requestId == null || requestId.isBlank()) {
+      requestId = "REQ-" + java.util.UUID.randomUUID();
+      MDC.put("x-request-id", requestId); // make it available to logs/handler
+    }
+
+    byte[] bytes = payload.getFileContent().getBytes(StandardCharsets.UTF_8);
+
+    // Build S3 metadata
+    Map<String, String> metadata = new HashMap<>();
+    if (payload.getOriginatorContactId() != null) {
+      metadata.put("originator-contact-id", payload.getOriginatorContactId());
+    }
+    metadata.put("request-id", requestId);
+    metadata.put("upload-timestamp", LocalDateTime.now().toString());
+
+    String s3Path = PENDING_FOLDER + payload.getFileName();
+
+    try {
+      PutObjectRequest putObjectRequest =
+          PutObjectRequest.builder()
+              .bucket(this.bucket)
+              .key(s3Path)
+              .contentType("text/csv")
+              .contentLength((long) bytes.length)
+              .metadata(metadata)
+              .build();
+
+      s3Client.putObject(putObjectRequest, RequestBody.fromBytes(bytes));
+      // Optional: keep an info log; stack traces handled at boundary
+      // log.info("Saved CSV to S3 bucket={} key={} requestId={}", bucket, s3Path, requestId);
+
+    } catch (S3Exception | SdkClientException ex) {
+      throw new SystemException(
+          ErrorCode.EXTERNAL_SERVICE_ERROR,
+          "Failed to upload CSV to S3",
+          ex,
+          null,
+          Map.of(
+              "operation",
+              "saveFileToS3",
+              "bucket",
+              bucket,
+              "key",
+              s3Path,
+              "requestId",
+              requestId));
+    } catch (RuntimeException ex) {
+      throw new SystemException(
+          ErrorCode.EXTERNAL_SERVICE_ERROR,
+          "Unexpected error while uploading CSV to S3",
+          ex,
+          null,
+          Map.of(
+              "operation",
+              "saveFileToS3",
+              "bucket",
+              bucket,
+              "key",
+              s3Path,
+              "requestId",
+              requestId));
+    }
+  }
+}
