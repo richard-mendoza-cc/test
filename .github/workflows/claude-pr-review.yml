@@ -1,0 +1,29 @@
+name: Claude Automated PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude_review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get diff and changed files
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+
+      - name: Extract relevant code
+        run: |
+          python .github/scripts/extract_context.py changed_files.txt > context.txt
+
+      - name: Claude review
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python .github/scripts/claude_review.py pr.diff context.txt "${{ github.event.pull_request.title }}" "${{ github.event.pull_request.body }}" "${{ github.event.pull_request.number }}"
