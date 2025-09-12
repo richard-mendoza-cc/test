@@ -17,6 +17,7 @@ jobs:
         run: |
           git fetch origin main
           git diff origin/main HEAD > pr.diff
+          git diff --name-only origin/main HEAD > changed_files.txt
 
       - name: Extract relevant code
         run: |
