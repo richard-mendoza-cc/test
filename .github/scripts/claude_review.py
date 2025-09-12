@@ -41,12 +41,20 @@ response = requests.post(
         "messages": [{"role": "user", "content": prompt}]
     }
 )
+# LOGGING: Claude API response
+print("Claude API status code:", response.status_code)
+print("Claude API raw response:", response.text)
+
 review = response.json().get("content", "")
 
 repo = os.environ.get("GITHUB_REPOSITORY")
 github_token = os.environ["GITHUB_TOKEN"]
-requests.post(
+comment_response = requests.post(
     f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
     headers={"Authorization": f"token {github_token}"},
     json={"body": review}
 )
+
+# LOGGING: GitHub comment POST response
+print("GitHub Comment POST status code:", comment_response.status_code)
+print("GitHub Comment POST response:", comment_response.text)
