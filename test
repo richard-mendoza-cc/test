@@ -1,0 +1,363 @@
+package com.currencycloud.manualledger.service;
+
+import com.currencycloud.manualledger.exception.BusinessException;
+import com.currencycloud.manualledger.exception.ErrorCode;
+import com.currencycloud.manualledger.exception.SystemException;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.Arrays;
+import java.util.Currency;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+import org.springframework.stereotype.Service;
+
+@Service
+public class FileValidatorService {
+
+  private static final List<String> EXPECTED_HEADERS =
+      Arrays.asList(
+          "Transaction Type",
+          "Name",
+          "Debit Credit",
+          "Value Date",
+          "Currency",
+          "Amount",
+          "Account Id",
+          "Ledger Group",
+          "Payment Provider",
+          "Workflow Type",
+          "Bank Ref",
+          "Funds Matcher Ref",
+          "Payment Id",
+          "Payment Group Id",
+          "Trade Id",
+          "Settlement Id",
+          "Cash Purchase Id",
+          "Sweep Id",
+          "Comments");
+  private static final List<String> REQUIRED_FIELDS =
+      Arrays.asList(
+          "Transaction Type",
+          "Name",
+          "Debit Credit",
+          "Value Date",
+          "Currency",
+          "Amount",
+          "Ledger Group",
+          "Payment Provider",
+          "Comments");
+  private static final int EXPECTED_FIELD_COUNT = EXPECTED_HEADERS.size();
+  private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+  private static final ZoneId UK_TIMEZONE = ZoneId.of("Europe/London");
+  private static final Pattern UUID_PATTERN =
+      Pattern.compile(
+          "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+
+  public void validateFileContent(String fileContent) {
+    if (fileContent == null || fileContent.trim().isEmpty()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "File content cannot be null or empty",
+          null,
+          Map.of("operation", "validateFileContent"));
+    }
+
+    validateFileContentStream(new StringReader(fileContent));
+  }
+
+  public void validateFileContentStream(Reader fileReader) {
+    try (BufferedReader bufferedReader = new BufferedReader(fileReader);
+        CSVParser parser = CSVFormat.DEFAULT.parse(bufferedReader); ) {
+      Iterator<CSVRecord> iterator = parser.iterator();
+
+      if (!iterator.hasNext()) {
+        throw new BusinessException(
+            ErrorCode.VALIDATION_FAILED,
+            "File must contain a header row",
+            null,
+            Map.of("operation", "validateFileContent"));
+      }
+
+      CSVRecord headerRow = iterator.next();
+      validateHeader(headerRow);
+
+      // Check that there is at least one data row
+      if (!iterator.hasNext()) {
+        throw new BusinessException(
+            ErrorCode.VALIDATION_FAILED,
+            "File must contain at least one data row after the header",
+            null,
+            Map.of("operation", "validateFileContent"));
+      }
+
+      // Process data rows one by one
+      int rowNumber = 2; // first data row after header is line 2
+      while (iterator.hasNext()) {
+        CSVRecord record = iterator.next();
+
+        // Field count validation
+        if (record.size() != EXPECTED_FIELD_COUNT) {
+          throw new BusinessException(
+              ErrorCode.VALIDATION_FAILED,
+              "Row "
+                  + rowNumber
+                  + " has "
+                  + record.size()
+                  + " fields; expected "
+                  + EXPECTED_FIELD_COUNT
+                  + ". Possible missing quotes around fields with commas, or malformed row.",
+              null,
+              Map.of(
+                  "operation",
+                  "validateFileRow",
+                  "rowNumber",
+                  rowNumber,
+                  "expectedFieldCount",
+                  EXPECTED_FIELD_COUNT,
+                  "actualFieldCount",
+                  record.size()));
+        }
+
+        validateRecordWithHeader(record, rowNumber);
+        rowNumber++;
+      }
+    } catch (IOException e) {
+      throw new SystemException(
+          ErrorCode.FILE_PROCESSING_FAILED,
+          "Failed to parse file content: " + e.getMessage(),
+          e,
+          null,
+          Map.of("operation", "validateFileContent"));
+    }
+  }
+
+  private void validateHeader(CSVRecord headerRow) {
+    if (headerRow.size() != EXPECTED_HEADERS.size()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "File header does not have the required number of columns",
+          null,
+          Map.of(
+              "operation",
+              "validateFileContent",
+              "expectedHeaderCount",
+              EXPECTED_HEADERS.size(),
+              "actualHeaderCount",
+              headerRow.size()));
+    }
+
+    for (int i = 0; i < EXPECTED_HEADERS.size(); i++) {
+      String actual = headerRow.get(i).trim();
+      String expected = EXPECTED_HEADERS.get(i);
+      if (!actual.equals(expected)) {
+        throw new BusinessException(
+            ErrorCode.VALIDATION_FAILED,
+            String.format(
+                "File header mismatch at column %d: expected '%s', found '%s'",
+                i + 1, expected, actual),
+            null,
+            Map.of(
+                "operation",
+                "validateFileContent",
+                "column",
+                i + 1,
+                "expected",
+                expected,
+                "found",
+                actual));
+      }
+    }
+  }
+
+  private void validateRecordWithHeader(CSVRecord record, int rowNumber) {
+    Map<String, String> recordMap = new HashMap<>();
+    for (int i = 0; i < EXPECTED_HEADERS.size() && i < record.size(); i++) {
+      recordMap.put(EXPECTED_HEADERS.get(i), record.get(i).trim());
+    }
+    validateRecord(recordMap, rowNumber);
+  }
+
+  private void validateRecord(Map<String, String> record, int rowNumber) {
+    // Check required fields
+    for (String field : REQUIRED_FIELDS) {
+      validateRequiredField(record.get(field), field, rowNumber);
+    }
+
+    String crDr = record.get("Debit Credit");
+    validateCrDr(crDr, rowNumber);
+
+    String currency = record.get("Currency");
+    validateCurrency(currency, rowNumber);
+
+    String fundsMatcherRef = record.get("Funds Matcher Ref");
+    if (fundsMatcherRef != null && !fundsMatcherRef.isEmpty()) {
+      validateUuid(fundsMatcherRef, "Funds Matcher Ref", rowNumber);
+    }
+
+    String ledgerGroup = record.get("Ledger Group");
+    String clientId = record.get("Account Id");
+    validateClientId(clientId, ledgerGroup, rowNumber);
+
+    String valueDate = record.get("Value Date");
+    validateValueDate(valueDate, rowNumber);
+  }
+
+  private void validateRequiredField(String value, String fieldName, int rowNumber) {
+    if (value == null || value.isEmpty()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          String.format("Required field '%s' is missing or empty", fieldName),
+          null,
+          Map.of("operation", "validateFileRow", "field", fieldName, "rowNumber", rowNumber));
+    }
+  }
+
+  private void validateCrDr(String crDr, int rowNumber) {
+    if (!"CR".equalsIgnoreCase(crDr) && !"DR".equalsIgnoreCase(crDr)) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Field 'cr_dr' must be either 'CR' or 'DR' (case insensitive)",
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              "Debit Credit",
+              "value",
+              crDr,
+              "rowNumber",
+              rowNumber));
+    }
+  }
+
+  private void validateCurrency(String currency, int rowNumber) {
+    if (currency == null || currency.isEmpty()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Field 'currency' cannot be null or empty",
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              "Currency",
+              "value",
+              currency,
+              "rowNumber",
+              rowNumber));
+    }
+
+    String currencyCode = currency.toUpperCase();
+    try {
+      Currency.getInstance(currencyCode);
+    } catch (IllegalArgumentException e) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Field 'currency' must be a valid ISO 4217 currency code",
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              "Currency",
+              "value",
+              currency,
+              "rowNumber",
+              rowNumber));
+    }
+  }
+
+  private void validateUuid(String uuid, String fieldName, int rowNumber) {
+    if (uuid == null || !UUID_PATTERN.matcher(uuid).matches()) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          String.format("Field '%s' must be a valid UUID format", fieldName),
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              fieldName,
+              "value",
+              uuid,
+              "rowNumber",
+              rowNumber));
+    }
+  }
+
+  private void validateClientId(String clientId, String ledgerGroup, int rowNumber) {
+    if ("client".equalsIgnoreCase(ledgerGroup)) {
+      if (clientId == null || clientId.isEmpty()) {
+        throw new BusinessException(
+            ErrorCode.VALIDATION_FAILED,
+            "Field 'client_id' is required when 'ledger_group' is 'client'",
+            null,
+            Map.of(
+                "operation",
+                "validateFileRow",
+                "field",
+                "Account Id",
+                "ledgerGroup",
+                ledgerGroup,
+                "rowNumber",
+                rowNumber));
+      }
+      validateUuid(clientId, "Account Id", rowNumber);
+    }
+    // If ledger_group is not "client", do not validate client_id
+  }
+
+  private void validateValueDate(String valueDate, int rowNumber) {
+    LocalDate parsedDate;
+    try {
+      parsedDate = LocalDate.parse(valueDate, DATE_FORMATTER);
+    } catch (DateTimeParseException e) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Field 'Value Date' must be in dd/MM/yyyy format",
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              "Value Date",
+              "value",
+              valueDate,
+              "rowNumber",
+              rowNumber));
+    }
+
+    LocalDate todayInUK = LocalDate.now(UK_TIMEZONE);
+    if (parsedDate.isAfter(todayInUK)) {
+      throw new BusinessException(
+          ErrorCode.VALIDATION_FAILED,
+          "Field 'Value Date' must not be in the past (UK timezone)",
+          null,
+          Map.of(
+              "operation",
+              "validateFileRow",
+              "field",
+              "Value Date",
+              "value",
+              valueDate,
+              "parsedDate",
+              parsedDate.toString(),
+              "todayInUK",
+              todayInUK.toString(),
+              "rowNumber",
+              rowNumber));
+    }
+  }
+}
