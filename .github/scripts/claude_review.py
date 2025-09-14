@@ -36,7 +36,7 @@ response = requests.post(
     "https://api.anthropic.com/v1/messages",
     headers={"x-api-key": os.environ["CLAUDE_API_KEY"]},
     json={
-        "model": "claude-3-sonnet-20240229",
+        "model": "claude-sonnet-4-20250514",
         "max_tokens": 1200,
         "messages": [{"role": "user", "content": prompt}]
     }
