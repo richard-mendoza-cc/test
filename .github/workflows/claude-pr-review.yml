@@ -1,32 +1,38 @@
-name: Claude Automated PR Review
-
+name: Claude Auto Review
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  claude_review:
+  review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Get diff and changed files
-        run: |
-          git fetch origin main
-          git diff origin/main HEAD > pr.diff
-          git diff --name-only origin/main HEAD > changed_files.txt
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
 
-      - name: Extract relevant code
-        run: |
-          python .github/scripts/extract_context.py changed_files.txt > context.txt
+            Please review this pull request with a focus on:
+            - Code quality and best practices
+            - Potential bugs or issues
+            - Security implications
+            - Performance considerations
 
-      - name: Claude review
-        env:
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          python .github/scripts/claude_review.py pr.diff context.txt "${{ github.event.pull_request.title }}" "${{ github.event.pull_request.body }}" "${{ github.event.pull_request.number }}"
-        
+            Note: The PR branch is already checked out in the current working directory.
+
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.
+            Only post GitHub comments - don't submit review text as messages.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
